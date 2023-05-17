@@ -309,7 +309,7 @@ class RFM9x:
         # Defaults set modem config to RadioHead compatible Bw125Cr45Sf128 mode.
         self.signal_bandwidth = 125000
         self.coding_rate = 5
-        self.spreading_factor = 7
+        self.spreading_factor = 12
         # Default to enable CRC checking on incoming packets.
         self.enable_crc = crc
         """CRC Enable state"""
@@ -336,7 +336,7 @@ class RFM9x:
         """The amount of time to poll for a received packet.
            If no packet is received, the returned packet will be None
         """
-        self.xmit_timeout = 2.0
+        self.xmit_timeout = 10.0
         """The amount of time to wait for the HW to transmit the packet.
            This is mainly used to prevent a hang due to a HW issue
         """
@@ -375,6 +375,11 @@ class RFM9x:
            Fourth byte of the RadioHead header.
         """
         self.crc_error_count = 0
+	symbolDuration = 1000 / ( self.signal_bandwidth / (1 << self.spreading_factor) )
+	if symbolDuration > 16:
+		self.low_datarate_optimize = 1
+	else:
+		self.low_datarate_optimize = 0
 
     # pylint: disable=no-member
     # Reconsider pylint: disable when this can be tested
@@ -716,24 +721,25 @@ class RFM9x:
         # Fill the FIFO with a packet to send.
         self._write_u8(_RH_RF95_REG_0D_FIFO_ADDR_PTR, 0x00)  # FIFO starts at 0.
         # Combine header and data to form payload
-        payload = bytearray(4)
-        if destination is None:  # use attribute
-            payload[0] = self.destination
-        else:  # use kwarg
-            payload[0] = destination
-        if node is None:  # use attribute
-            payload[1] = self.node
-        else:  # use kwarg
-            payload[1] = node
-        if identifier is None:  # use attribute
-            payload[2] = self.identifier
-        else:  # use kwarg
-            payload[2] = identifier
-        if flags is None:  # use attribute
-            payload[3] = self.flags
-        else:  # use kwarg
-            payload[3] = flags
-        payload = payload + data
+        payload = bytearray(1)
+#        if destination is None:  # use attribute
+#            payload[0] = self.destination
+#        else:  # use kwarg
+#            payload[0] = destination
+#        if node is None:  # use attribute
+#            payload[1] = self.node
+#        else:  # use kwarg
+#            payload[1] = node
+#        if identifier is None:  # use attribute
+#            payload[2] = self.identifier
+#        else:  # use kwarg
+#            payload[2] = identifier
+#        if flags is None:  # use attribute
+#            payload[3] = self.flags
+#        else:  # use kwarg
+#            payload[3] = flags
+        #payload = payload + data
+        payload = data
         # Write payload.
         self._write_from(_RH_RF95_REG_00_FIFO, payload)
         # Write payload and header length.
@@ -872,41 +878,6 @@ class RFM9x:
                 self._write_u8(_RH_RF95_REG_12_IRQ_FLAGS, 0xFF)
                 if fifo_length < 5:
                     packet = None
-                else:
-                    if (
-                        self.node != _RH_BROADCAST_ADDRESS
-                        and packet[0] != _RH_BROADCAST_ADDRESS
-                        and packet[0] != self.node
-                    ):
-                        packet = None
-                    # send ACK unless this was an ACK or a broadcast
-                    elif (
-                        with_ack
-                        and ((packet[3] & _RH_FLAGS_ACK) == 0)
-                        and (packet[0] != _RH_BROADCAST_ADDRESS)
-                    ):
-                        # delay before sending Ack to give receiver a chance to get ready
-                        if self.ack_delay is not None:
-                            time.sleep(self.ack_delay)
-                        # send ACK packet to sender (data is b'!')
-                        self.send(
-                            b"!",
-                            destination=packet[1],
-                            node=packet[0],
-                            identifier=packet[2],
-                            flags=(packet[3] | _RH_FLAGS_ACK),
-                        )
-                        # reject Retries if we have seen this idetifier from this source before
-                        if (self.seen_ids[packet[1]] == packet[2]) and (
-                            packet[3] & _RH_FLAGS_RETRY
-                        ):
-                            packet = None
-                        else:  # save the packet identifier for this source
-                            self.seen_ids[packet[1]] = packet[2]
-                    if (
-                        not with_header and packet is not None
-                    ):  # skip the header if not wanted
-                        packet = packet[4:]
         # Listen again if necessary and return the result packet.
         if keep_listening:
             self.listen()
