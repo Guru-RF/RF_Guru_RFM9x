@@ -16,7 +16,6 @@ import random
 import time
 import adafruit_bus_device.spi_device as spidev
 from micropython import const
-import asyncio
 
 HAS_SUPERVISOR = False
 
@@ -807,7 +806,7 @@ class RFM9x:
         self.flags = 0  # clear flags
         return got_ack
 
-    async def receive(
+    def receive(
         self,
         *,
         keep_listening: bool = True,
@@ -843,13 +842,11 @@ class RFM9x:
             if HAS_SUPERVISOR:
                 start = supervisor.ticks_ms()
                 while not timed_out and not self.rx_done():
-                    await asyncio.sleep(0)
                     if ticks_diff(supervisor.ticks_ms(), start) >= timeout * 1000:
                         timed_out = True
             else:
                 start = time.monotonic()
                 while not timed_out and not self.rx_done():
-                    await asyncio.sleep(0)
                     if time.monotonic() - start >= timeout:
                         timed_out = True
         # Payload ready is set, a packet is in the FIFO.
