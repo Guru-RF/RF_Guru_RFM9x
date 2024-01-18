@@ -811,6 +811,7 @@ class RFM9x:
 
     def receive(
         self,
+        w,
         *,
         keep_listening: bool = True,
         with_header: bool = False,
@@ -845,11 +846,13 @@ class RFM9x:
             if HAS_SUPERVISOR:
                 start = supervisor.ticks_ms()
                 while not timed_out and not self.rx_done():
+                    w.feed()
                     if ticks_diff(supervisor.ticks_ms(), start) >= timeout * 1000:
                         timed_out = True
             else:
                 start = time.monotonic()
                 while not timed_out and not self.rx_done():
+                    w.feed()
                     if time.monotonic() - start >= timeout:
                         timed_out = True
         # Payload ready is set, a packet is in the FIFO.
