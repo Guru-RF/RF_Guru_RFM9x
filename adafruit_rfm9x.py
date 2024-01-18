@@ -689,6 +689,7 @@ class RFM9x:
     # pylint: disable=too-many-branches
     def send(
         self,
+        w,
         data: ReadableBuffer,
         *,
         keep_listening: bool = False,
@@ -752,11 +753,13 @@ class RFM9x:
         if HAS_SUPERVISOR:
             start = supervisor.ticks_ms()
             while not timed_out and not self.tx_done():
+                w.feed()
                 if ticks_diff(supervisor.ticks_ms(), start) >= self.xmit_timeout * 1000:
                     timed_out = True
         else:
             start = time.monotonic()
             while not timed_out and not self.tx_done():
+                w.feed()
                 if time.monotonic() - start >= self.xmit_timeout:
                     timed_out = True
         # Listen again if necessary and return the result packet.
