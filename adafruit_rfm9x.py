@@ -14,6 +14,7 @@ http: www.airspayce.com/mikem/arduino/RadioHead/
 """
 import random
 import time
+import asyncio
 import adafruit_bus_device.spi_device as spidev
 from micropython import const
 
@@ -772,6 +773,91 @@ class RFM9x:
         self._write_u8(_RH_RF95_REG_12_IRQ_FLAGS, 0xFF)
         return not timed_out
 
+    # pylint: disable=too-many-branches
+    async def asend(
+        self,
+        data: ReadableBuffer,
+        *,
+        keep_listening: bool = False,
+        destination: Optional[int] = None,
+        node: Optional[int] = None,
+        identifier: Optional[int] = None,
+        flags: Optional[int] = None
+    ) -> bool:
+        """Send a string of data using the transmitter.
+        You can only send 252 bytes at a time
+        (limited by chip's FIFO size and appended headers).
+        This appends a 4 byte header to be compatible with the RadioHead library.
+        The header defaults to using the initialized attributes:
+        (destination,node,identifier,flags)
+        It may be temporarily overidden via the kwargs - destination,node,identifier,flags.
+        Values passed via kwargs do not alter the attribute settings.
+        The keep_listening argument should be set to True if you want to start listening
+        automatically after the packet is sent. The default setting is False.
+
+        Returns: True if success or False if the send timed out.
+        """
+        # Disable pylint warning to not use length as a check for zero.
+        # This is a puzzling warning as the below code is clearly the most
+        # efficient and proper way to ensure a precondition that the provided
+        # buffer be within an expected range of bounds. Disable this check.
+        # pylint: disable=len-as-condition
+        assert 0 < len(data) <= 252
+        # pylint: enable=len-as-condition
+        self.idle()  # Stop receiving to clear FIFO and keep it clear.
+        # Fill the FIFO with a packet to send.
+        self._write_u8(_RH_RF95_REG_0D_FIFO_ADDR_PTR, 0x00)  # FIFO starts at 0.
+        # Combine header and data to form payload
+        payload = bytearray(1)
+#        if destination is None:  # use attribute
+#            payload[0] = self.destination
+#        else:  # use kwarg
+#            payload[0] = destination
+#        if node is None:  # use attribute
+#            payload[1] = self.node
+#        else:  # use kwarg
+#            payload[1] = node
+#        if identifier is None:  # use attribute
+#            payload[2] = self.identifier
+#        else:  # use kwarg
+#            payload[2] = identifier
+#        if flags is None:  # use attribute
+#            payload[3] = self.flags
+#        else:  # use kwarg
+#            payload[3] = flags
+        #payload = payload + data
+        payload = data
+        # Write payload.
+        self._write_from(_RH_RF95_REG_00_FIFO, payload)
+        # Write payload and header length.
+        self._write_u8(_RH_RF95_REG_22_PAYLOAD_LENGTH, len(payload))
+        # Turn on transmit mode to send out the packet.
+        self.transmit()
+        # Wait for tx done interrupt with explicit polling (not ideal but
+        # best that can be done right now without interrupts).
+        timed_out = False
+        if HAS_SUPERVISOR:
+            start = supervisor.ticks_ms()
+            while not timed_out and not self.tx_done():
+                await asyncio.sleep(0)
+                if ticks_diff(supervisor.ticks_ms(), start) >= self.xmit_timeout * 1000:
+                    timed_out = True
+        else:
+            start = time.monotonic()
+            while not timed_out and not self.tx_done():
+                await asyncio.sleep(0)
+                if time.monotonic() - start >= self.xmit_timeout:
+                    timed_out = True
+        # Listen again if necessary and return the result packet.
+        if keep_listening:
+            self.listen()
+        else:
+            # Enter idle mode to stop receiving other packets.
+            self.idle()
+        # Clear interrupt.
+        self._write_u8(_RH_RF95_REG_12_IRQ_FLAGS, 0xFF)
+        return not timed_out
+
     def send_with_ack(self, data: ReadableBuffer) -> bool:
         """Reliable Datagram mode:
         Send a packet with data and wait for an ACK response.
@@ -808,7 +894,7 @@ class RFM9x:
             self.flags |= _RH_FLAGS_RETRY
         self.flags = 0  # clear flags
         return got_ack
-
+    
     def receive(
         self,
         w,
@@ -853,6 +939,90 @@ class RFM9x:
                 start = time.monotonic()
                 while not timed_out and not self.rx_done():
                     w.feed()
+                    if time.monotonic() - start >= timeout:
+                        timed_out = True
+        # Payload ready is set, a packet is in the FIFO.
+        packet = None
+        # save last RSSI reading
+        self.last_rssi = self.rssi
+
+        # save the last SNR reading
+        self.last_snr = self.snr
+
+        # Enter idle mode to stop receiving other packets.
+        self.idle()
+        if not timed_out:
+            if self.enable_crc and self.crc_error():
+                self.crc_error_count += 1
+            else:
+                # Read the data from the FIFO.
+                # Read the length of the FIFO.
+                fifo_length = self._read_u8(_RH_RF95_REG_13_RX_NB_BYTES)
+                # Handle if the received packet is too small to include the 4 byte
+                # RadioHead header and at least one byte of data --reject this packet and ignore it.
+                if fifo_length > 0:  # read and clear the FIFO if anything in it
+                    current_addr = self._read_u8(_RH_RF95_REG_10_FIFO_RX_CURRENT_ADDR)
+                    self._write_u8(_RH_RF95_REG_0D_FIFO_ADDR_PTR, current_addr)
+                    packet = bytearray(fifo_length)
+                    # Read the packet.
+                    self._read_into(_RH_RF95_REG_00_FIFO, packet)
+                # Clear interrupt.
+                self._write_u8(_RH_RF95_REG_12_IRQ_FLAGS, 0xFF)
+                if fifo_length < 5:
+                    packet = None
+        # Listen again if necessary and return the result packet.
+        if keep_listening:
+            self.listen()
+        else:
+            # Enter idle mode to stop receiving other packets.
+            self.idle()
+        # Clear interrupt.
+        self._write_u8(_RH_RF95_REG_12_IRQ_FLAGS, 0xFF)
+        return packet
+
+    async def areceive(
+        self,
+        *,
+        keep_listening: bool = True,
+        with_header: bool = False,
+        with_ack: bool = False,
+        timeout: Optional[float] = None
+    ) -> Optional[bytearray]:
+        """Wait to receive a packet from the receiver. If a packet is found the payload bytes
+        are returned, otherwise None is returned (which indicates the timeout elapsed with no
+        reception).
+        If keep_listening is True (the default) the chip will immediately enter listening mode
+        after reception of a packet, otherwise it will fall back to idle mode and ignore any
+        future reception.
+        All packets must have a 4-byte header for compatibility with the
+        RadioHead library.
+        The header consists of 4 bytes (To,From,ID,Flags). The default setting will  strip
+        the header before returning the packet to the caller.
+        If with_header is True then the 4 byte header will be returned with the packet.
+        The payload then begins at packet[4].
+        If with_ack is True, send an ACK after receipt (Reliable Datagram mode)
+        """
+        timed_out = False
+        if timeout is None:
+            timeout = self.receive_timeout
+        if timeout is not None:
+            # Wait for the payload_ready signal.  This is not ideal and will
+            # surely miss or overflow the FIFO when packets aren't read fast
+            # enough, however it's the best that can be done from Python without
+            # interrupt supports.
+            # Make sure we are listening for packets.
+            self.listen()
+            timed_out = False
+            if HAS_SUPERVISOR:
+                start = supervisor.ticks_ms()
+                while not timed_out and not self.rx_done():
+                    await asyncio.sleep(0)
+                    if ticks_diff(supervisor.ticks_ms(), start) >= timeout * 1000:
+                        timed_out = True
+            else:
+                start = time.monotonic()
+                while not timed_out and not self.rx_done():
+                    await asyncio.sleep(0)
                     if time.monotonic() - start >= timeout:
                         timed_out = True
         # Payload ready is set, a packet is in the FIFO.
