@@ -982,6 +982,7 @@ class RFM9x:
 
     async def areceive(
         self,
+        w,
         *,
         keep_listening: bool = True,
         with_header: bool = False,
@@ -1017,11 +1018,13 @@ class RFM9x:
                 start = supervisor.ticks_ms()
                 while not timed_out and not self.rx_done():
                     await asyncio.sleep(0)
+                    w.feed()
                     if ticks_diff(supervisor.ticks_ms(), start) >= timeout * 1000:
                         timed_out = True
             else:
                 start = time.monotonic()
                 while not timed_out and not self.rx_done():
+                    w.feed()
                     await asyncio.sleep(0)
                     if time.monotonic() - start >= timeout:
                         timed_out = True
